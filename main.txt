@@ -1,0 +1,223 @@
+巡查代码：
+#!/usr/bin/env python 
+# -*- coding: utf-8 -*-
+ 
+import roslib;
+import rospy  
+import actionlib  
+from actionlib_msgs.msg import *  
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Point, Quaternion, Twist  
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal  
+from random import sample  
+from math import pow, sqrt  
+
+class NavTest():  
+    def __init__(self):  
+        rospy.init_node('exploring_slam', anonymous=True)  
+        rospy.on_shutdown(self.shutdown)  
+
+        # 在每个目标位置暂停的时间 (单位：s)
+        self.rest_time = rospy.get_param("~rest_time", 2)   
+        self.fake_test = rospy.get_param("~fake_test", True)  
+
+        # 到达目标的状态  
+        goal_states = ['PENDING', 'ACTIVE', 'PREEMPTED',   
+                       'SUCCEEDED', 'ABORTED', 'REJECTED',  
+                       'PREEMPTING', 'RECALLING', 'RECALLED',  
+                       'LOST']  
+ 
+        # 设置目标点的位置  
+        # 在rviz中点击 2D Nav Goal 按键，然后单击地图中一点  
+        # 在终端中就会看到该点的坐标信息  
+        locations = dict()  
+
+        locations['1'] = Pose(Point(-0.775, -0.654, 0.030), Quaternion(0.009, 0.000, 0.999, 0.028))  
+        locations['2'] = Pose(Point(-7.364, -1.137, 0.030), Quaternion(-0.006, -0.006, 0.665, -0.746))  
+        locations['3'] = Pose(Point(-7.282, -6.668, 0.030), Quaternion(-0.001, -0.009, 0.137, -0.990))  
+        locations['4'] = Pose(Point(-0.030, -7.551, 0.030), Quaternion(-0.009, 0.000, 0.998, 0.046))  
+        locations['5'] = Pose(Point(-6.787, -6.917, 0.030), Quaternion(-0.006, 0.006, 0.716, 0.697))  
+        locations['6'] = Pose(Point(0.0615, -1.169, 0.030),   Quaternion(-0.009, 0.000, 0.997, 0.064))  
+
+        # 发布控制机器人的消息  
+        self.cmd_vel_pub = rospy.Publisher('cmd_vel', Twist, queue_size=5)  
+
+        # 订阅move_base服务器的消息  
+        self.move_base = actionlib.SimpleActionClient("move_base", MoveBaseAction)  
+
+        rospy.loginfo("Waiting for move_base action server...")  
+
+        # 60s等待时间限制  
+        self.move_base.wait_for_server(rospy.Duration(60))  
+        rospy.loginfo("Connected to move base server")  
+  
+        # 保存机器人的在rviz中的初始位置  
+        initial_pose = PoseWithCovarianceStamped()  
+
+        # 保存成功率、运行时间、和距离的变量  
+        n_locations = len(locations)  
+        n_goals = 0  
+        n_successes = 0  
+        i = n_locations  
+        distance_traveled = 0  
+        start_time = rospy.Time.now()  
+        running_time = 0  
+        location = ""  
+        last_location = ""    
+ 
+        # 确保有初始位置  
+        while initial_pose.header.stamp == "":  
+            rospy.sleep(1)  
+
+        rospy.loginfo("Starting navigation test")  
+
+        # 开始主循环，随机导航  
+        while not rospy.is_shutdown():  
+            # 如果已经走完了所有点，再重新开始排序  
+            if i == n_locations:  
+                i = 0  
+                sequence = sample(locations, n_locations)  
+ 
+                # 如果最后一个点和第一个点相同，则跳过  
+                if sequence[0] == last_location:  
+                    i = 1  
+
+            # 在当前的排序中获取下一个目标点  
+            location = sequence[i]  
+
+            # 跟踪行驶距离  
+            # 使用更新的初始位置  
+            if initial_pose.header.stamp == "":  
+                distance = sqrt(pow(locations[location].position.x -   
+                                    locations[last_location].position.x, 2) +  
+                                pow(locations[location].position.y -   
+                                    locations[last_location].position.y, 2))  
+            else:  
+                rospy.loginfo("Updating current pose.")  
+                distance = sqrt(pow(locations[location].position.x -   
+                                    initial_pose.pose.pose.position.x, 2) +  
+                                pow(locations[location].position.y -   
+                                    initial_pose.pose.pose.position.y, 2))  
+                initial_pose.header.stamp = ""  
+
+            # 存储上一次的位置，计算距离  
+            last_location = location  
+
+            # 计数器加1  
+            i += 1  
+            n_goals += 1  
+
+            # 设定下一个目标点  
+            self.goal = MoveBaseGoal()  
+            self.goal.target_pose.pose = locations[location]  
+            self.goal.target_pose.header.frame_id = 'map'  
+            self.goal.target_pose.header.stamp = rospy.Time.now()  
+
+            # 让用户知道下一个位置  
+            rospy.loginfo("Going to: " + str(location))  
+
+            # 向下一个位置进发  
+            self.move_base.send_goal(self.goal)  
+
+            # 五分钟时间限制  
+            finished_within_time = self.move_base.wait_for_result(rospy.Duration(300))   
+
+            # 查看是否成功到达  
+            if not finished_within_time:  
+                self.move_base.cancel_goal()  
+                rospy.loginfo("Timed out achieving goal")  
+            else:  
+                state = self.move_base.get_state()  
+                if state == GoalStatus.SUCCEEDED:  
+                    rospy.loginfo("Goal succeeded!")  
+                    n_successes += 1  
+                    distance_traveled += distance  
+                    rospy.loginfo("State:" + str(state))  
+                else:  
+                  rospy.loginfo("Goal failed with error code: " + str(goal_states[state]))  
+
+            # 运行所用时间  
+            running_time = rospy.Time.now() - start_time  
+            running_time = running_time.secs / 60.0  
+
+            # 输出本次导航的所有信息  
+            rospy.loginfo("Success so far: " + str(n_successes) + "/" +   
+                          str(n_goals) + " = " +   
+                          str(100 * n_successes/n_goals) + "%")  
+
+            rospy.loginfo("Running time: " + str(trunc(running_time, 1)) +   
+                          " min Distance: " + str(trunc(distance_traveled, 1)) + " m")  
+
+            rospy.sleep(self.rest_time)  
+
+    def update_initial_pose(self, initial_pose):  
+        self.initial_pose = initial_pose  
+
+    def shutdown(self):  
+        rospy.loginfo("Stopping the robot...")  
+        self.move_base.cancel_goal()  
+        rospy.sleep(2)  
+        self.cmd_vel_pub.publish(Twist())  
+        rospy.sleep(1)  
+
+def trunc(f, n):  
+    slen = len('%.*f' % (n, f))  
+
+    return float(str(f)[:slen])  
+
+if __name__ == '__main__':  
+    try:  
+        NavTest()  
+        rospy.spin()  
+
+    except rospy.ROSInterruptException:  
+        rospy.loginfo("Exploring SLAM finished.")
+建图代码：
+<launch>
+
+    <!-- 设置launch文件的参数 -->
+    <arg name="paused" default="false"/>
+    <arg name="use_sim_time" default="true"/>
+    <arg name="gui" default="true"/>
+    <arg name="headless" default="false"/>
+    <arg name="debug" default="false"/>
+
+    <!-- 运行gazebo仿真环境 -->
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="debug" value="$(arg debug)" />
+        <arg name="gui" value="$(arg gui)" />
+        <arg name="paused" value="$(arg paused)"/>
+        <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+        <arg name="headless" value="$(arg headless)"/>
+    </include>
+
+    <!-- 加载机器人模型描述参数 -->
+    <param name="robot_description" command="$(find xacro)/xacro --inorder '$(find mbot_description)/urdf/xacro/gazebo/mbot_with_2laserandcamera_gazebo.xacro'" /> 
+
+    <!-- 运行joint_state_publisher节点，发布机器人的关节状态  -->
+    <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" ></node> 
+
+    <!-- 运行robot_state_publisher节点，发布tf  -->
+    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"  output="screen" >
+        <param name="publish_frequency" type="double" value="50.0" />
+    </node>
+
+    <!-- 在gazebo中加载机器人模型-->
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model" respawn="false" output="screen"
+          args="-urdf -model mbot -param robot_description"/> 
+
+</launch>
+
+
+执行机器人巡查命令：
+ locations['1'] = Pose(Point(-0.775, -0.654, 0.030), Quaternion(0.009, 0.000, 0.999, 0.028))  
+ locations['2'] = Pose(Point(-7.364, -1.137, 0.030), Quaternion(-0.006, -0.006, 0.665, -0.746))  
+ locations['3'] = Pose(Point(-7.282, -6.668, 0.030), Quaternion(-0.001, -0.009, 0.137, -0.990))  
+ locations['4'] = Pose(Point(-0.030, -7.551, 0.030), Quaternion(-0.009, 0.000, 0.998, 0.046))  
+ locations['5'] = Pose(Point(-6.787, -6.917, 0.030), Quaternion(-0.006, 0.006, 0.716, 0.697))  
+ locations['6'] = Pose(Point(0.0615, -1.169, 0.030),   Quaternion(-0.009, 0.000, 0.997, 0.064))  
+
+
+地图建立命名：
+roslaunch mbot_gazebo nav_gmapping_view_mbot_gazebolaserandcamera_room2.launch
+rosrun mbot_navigation exploring_slam_room2.py
+
